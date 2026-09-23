@@ -193,7 +193,7 @@ class FactGate:
             if self.vocabulary:
                 criteria = {
                     name: (
-                        {k: v for k, v in meaning.items() if k not in ("many", "retires")}
+                        {k: v for k, v in meaning.items() if k not in ("many", "retires", "per")}
                         if isinstance(meaning, dict)
                         else meaning
                     )
@@ -263,6 +263,12 @@ class FactGate:
                 continue
             top = ranked(answers, f"label_{index}")
             if top and top[0][0] == label and top[0][1] >= RELABEL_SUBJECT_FLOOR:
+                meaning = self.vocabulary.get(label)
+                if isinstance(meaning, dict) and meaning.get("per"):
+                    # "JEE Main | scheduled_in | April" is the date of the exam
+                    # its subject names; keep the name, or the value is a bare
+                    # month that no longer says which exam.
+                    facts[index].value = f"{facts[index].subject}: {facts[index].value}"
                 retry[index] = f"{self.canonical_subject} | {label} | {facts[index].value}"
         if not retry:
             return judged
@@ -291,6 +297,7 @@ class FactGate:
         questions: Dict[str, Any] = {}
         state_items: Dict[str, Any] = {}
         offered: Dict[int, List[Tuple[str, str]]] = {}
+        keyed: Dict[int, List[Tuple[str, str]]] = {}
         for index, fact in enumerate(facts):
             try:
                 stored = existing(fact.subject, fact.predicate)[:MAX_EXISTING]
@@ -308,6 +315,34 @@ class FactGate:
                 # A predicate with one value at a time: a different value is an
                 # update, and storage supersedes the old one. Asking "same
                 # topic?" here merged "class 12" into "class 11" — measured.
+                continue
+            per = meaning.get("per") if isinstance(meaning, dict) else None
+            if per:
+                # One value per thing — per exam, say. The question is not
+                # "same topic?" but "same exam?", and a match is an update of
+                # that exam's value, not a restatement. Measured without this:
+                # the JEE date (April) replaced the boards date (March).
+                keyed[index] = stored
+                criteria = {f"stored_{k}": value for k, (value, _key) in enumerate(stored)}
+                criteria[NEW_FACT] = f"A different {per} from every stored value."
+                questions[f"same_{index}"] = {
+                    "type": "choice",
+                    "instructions": {
+                        "relation": f"{fact.subject} {fact.predicate}",
+                        "new_value": fact.value,
+                        "question": (
+                            f"Is the new value for the same {per} as one of the stored values, "
+                            f"whatever else differs? Pick that stored value, or new_fact for a "
+                            f"different {per}."
+                        ),
+                    },
+                    "criteria": criteria,
+                }
+                state_items[str(index)] = {
+                    "relation": f"{fact.subject} {fact.predicate}",
+                    "new_value": fact.value,
+                    "stored_values": criteria,
+                }
                 continue
             offered[index] = stored
             criteria = {f"stored_{k}": value for k, (value, _key) in enumerate(stored)}
@@ -344,6 +379,19 @@ class FactGate:
         if answers is None:
             return 0
         merged = 0
+        for index, stored in keyed.items():
+            top = ranked(answers, f"same_{index}")
+            if not top or top[0][0] == NEW_FACT or top[0][1] < self.same_floor:
+                continue
+            try:
+                pick = int(top[0][0].split("_", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if 0 <= pick < len(stored):
+                value, key = stored[pick]
+                fact = facts[index]
+                # The same thing with a new value replaces the old value.
+                _add_retirement(fact, key or f"{fact.subject}|{fact.predicate}|{value}")
         for index, stored in offered.items():
             top = ranked(answers, f"same_{index}")
             if not top or top[0][0] == NEW_FACT or top[0][1] < self.same_floor:

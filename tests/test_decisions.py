@@ -532,3 +532,50 @@ def test_a_fact_filed_under_a_thing_is_asked_again_as_the_persons():
     gate = FactGate(Scripted(answer), vocabulary=vocabulary, subjects=["the student"])
     kept, report = gate.apply("my JEE got moved to April", [fact("JEE Main", "scheduled_in", "April")])
     assert [(f.subject, f.predicate, f.value) for f in kept] == [("user", "exam_on", "April")]
+
+
+def test_one_date_per_exam_not_one_date_per_student():
+    """Measured over a simulated hundred days: `exam_on` held one value, so the
+    JEE date (April) replaced the boards date (March)."""
+    tmp = tempfile.mkdtemp()
+    db = FullSQLiteManager(os.path.join(tmp, "t.db"))
+    with db._get_connection() as conn:
+        for mid in ("m1", "m2", "m3"):
+            conn.execute("INSERT INTO memories (id, memory, user_id) VALUES (?, ?, ?)", (mid, mid, "u"))
+    resolver = ContextResolver(db)
+    vocabulary = {"exam_on": {"what": "the date of an exam, as '<exam>: <date>'", "many": True, "per": "exam"}}
+
+    def answer(qid, q):
+        if qid.startswith(("about", "support")):
+            return {"noul": 0.95}
+        if qid.startswith("label"):
+            return choice("exam_on", 0.95, [NONE_OF_THESE])
+        if qid.startswith("same"):
+            new = q["instructions"]["new_value"].split(":")[0]
+            for option, value in q["criteria"].items():
+                if option.startswith("stored") and value.split(":")[0] == new:
+                    return choice(option, 0.95, [NEW_FACT])
+            return choice(NEW_FACT, 0.95)
+        return {"noul": 0.05}
+
+    gate = FactGate(Scripted(answer), vocabulary=vocabulary, subjects=["the student"])
+
+    def existing(subject, predicate):
+        with db._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT value, canonical_key FROM engram_facts WHERE subject=? AND predicate=? "
+                "AND superseded_by_id IS NULL",
+                (subject, predicate),
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    for memory_id, value in (("m1", "JEE Main: January"), ("m2", "CBSE boards: March"), ("m3", "JEE Main: April")):
+        f = fact("user", "exam", value)
+        f.valid_from = "2026-06-0" + memory_id[-1]
+        kept, _ = gate.apply("…", [f], existing)
+        resolver.store_engram(_engram(kept), memory_id)
+
+    with db._get_connection() as conn:
+        active = [r[0] for r in conn.execute(
+            "SELECT value FROM engram_facts WHERE superseded_by_id IS NULL ORDER BY value").fetchall()]
+    assert active == ["CBSE boards: March", "JEE Main: April"]

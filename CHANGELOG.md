@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.4.3] - 2026-09-23 - One value per thing
+
+- **`per`: a predicate can hold one value per thing.** A vocabulary entry such
+  as `"exam_on": {"many": true, "per": "exam"}` keeps one date per exam: a new
+  value for the same exam replaces that exam's old one, and values for other
+  exams stay. Measured before this, a student's JEE date (April) replaced their
+  boards date (March), because the predicate held one value per person.
+- **A fact filed under the thing keeps its name.** When "JEE Main |
+  scheduled_in | April" is re-read as the person's `exam_on`, its value becomes
+  "JEE Main: April" rather than a bare month that no longer says which exam.
+
 ## [7.4.2] - 2026-09-23 - Tested over a simulated hundred days
 
 Everything here was found by running one simulated student through a hundred
