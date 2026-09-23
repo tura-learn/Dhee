@@ -61,7 +61,7 @@ class JevDecider:
         provider: str = "openrouter",
         base_url: Optional[str] = None,
         model: Optional[str] = None,
-        timeout_seconds: float = 6.0,
+        timeout_seconds: float = 10.0,
     ) -> None:
         self.api_key = api_key.strip()
         self.provider = provider
@@ -132,7 +132,7 @@ def decider_from_config(config: Any) -> Optional[JevDecider]:
         provider=getattr(config, "provider", "openrouter"),
         base_url=getattr(config, "base_url", None),
         model=getattr(config, "model", None),
-        timeout_seconds=getattr(config, "timeout_seconds", 6.0),
+        timeout_seconds=getattr(config, "timeout_seconds", 10.0),
     )
 
 

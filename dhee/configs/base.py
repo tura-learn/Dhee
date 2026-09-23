@@ -498,10 +498,12 @@ class DecisionConfig(BaseModel):
     api_key: Optional[str] = None
     api_key_env: Optional[str] = None
     model: Optional[str] = None
-    timeout_seconds: float = 6.0
+    timeout_seconds: float = 10.0
     #: Controlled vocabulary for facts about the subject: predicate -> meaning.
     #: A meaning is a sentence, or an object such as ``{"what": ..., "not_for":
-    #: ...}`` when a boundary between two predicates needs stating. Empty means
+    #: ..., "many": true}`` — ``not_for`` states a boundary between two
+    #: predicates, and ``many`` marks one that holds several values at once, so
+    #: a new value is added beside the old rather than replacing it. Empty means
     #: predicates are left as the extractor wrote them.
     fact_vocabulary: Dict[str, Any] = Field(default_factory=dict)
     #: Who the facts are about. When set, facts judged not to be about them

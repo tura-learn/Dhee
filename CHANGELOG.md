@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.4.1] - 2026-09-23 - A dated fact no longer wipes a list
+
+- **A predicate can hold many values.** `store_engram` treated any fact with a
+  `valid_from` as the new value of its predicate and retired every other value.
+  Right for a city or a class; wrong for "finds hard" — measured on a copy of
+  a real student store, one conversation's dated `finds_hard: vectors` retired
+  ten other difficulties. A vocabulary entry can now say `"many": true`; the
+  fact gate marks such facts, and storage adds them beside the old values.
+  Stores without a gate behave exactly as before.
+- **`select_relevant` compares values, not labels, when keeping one slot per
+  idea.** "What they find hard: vectors" and "…: resolving components" share a
+  label, not an idea; the second was being dropped as a repeat.
+- **Decision timeout 6s → 10s.** A store regate over 293 facts timed out on 4
+  of 134 calls at 6s and on none at 10s. Writes and regates are background
+  work; read paths pass their own, shorter timeout.
+
 ## [7.4.0] - 2026-09-23 - Decisions: memory that judges before it stores and before it speaks
 
 Several steps in Dhee were never generation. Is this fact about the person?

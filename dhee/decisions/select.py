@@ -98,7 +98,14 @@ _STOP = {"a", "an", "the", "of", "in", "on", "to", "and", "with", "for", "is", "
 
 
 def _content_words(text: str) -> set:
-    cleaned = "".join(ch if ch.isalnum() else " " for ch in str(text).lower().replace("_", " "))
+    text = str(text)
+    head, sep, rest = text.partition(": ")
+    if sep and len(head) <= 40:
+        # "What they find hard: vectors" and "What they find hard: resolving
+        # components" share their label, not their idea. Measured: comparing
+        # the whole line dropped the second as a repeat of the first.
+        text = rest
+    cleaned = "".join(ch if ch.isalnum() else " " for ch in text.lower().replace("_", " "))
     return {w.rstrip("s") for w in cleaned.split() if w not in _STOP and len(w) > 2}
 
 

@@ -113,6 +113,10 @@ class FactGate:
                 if fact.predicate != label:
                     report.relabelled += 1
                     fact.predicate = label
+                meaning = self.vocabulary.get(label)
+                if isinstance(meaning, dict) and meaning.get("many"):
+                    # Storage must not treat a new value as replacing the old.
+                    fact.multi_valued = True
                 # The extractor's key was built from its own label; a stale key
                 # would file the fact under a predicate it no longer has.
                 fact.canonical_key = ""
@@ -154,7 +158,10 @@ class FactGate:
                     },
                 }
             if self.vocabulary:
-                criteria = {name: meaning for name, meaning in self.vocabulary.items()}
+                criteria = {
+                    name: ({k: v for k, v in meaning.items() if k != "many"} if isinstance(meaning, dict) else meaning)
+                    for name, meaning in self.vocabulary.items()
+                }
                 criteria[NONE_OF_THESE] = "The fact fits none of these relations."
                 questions[f"label_{index}"] = {
                     "type": "choice",

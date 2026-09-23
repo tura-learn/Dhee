@@ -343,3 +343,53 @@ def test_an_old_store_is_regated_once_and_nothing_is_deleted():
     assert (facts["f1"]["predicate"], facts["f1"]["reaffirmed_count"]) == ("finds_hard", 1)
     assert facts["f2"]["valid_until"] and facts["f2"]["tier"] == "avoid"
     assert facts["f3"]["superseded_by_id"] == "f1"
+
+
+def test_a_dated_fact_does_not_wipe_a_predicate_that_holds_many_values():
+    """Measured on a student store: one dated "finds_hard: vectors" retired ten
+    other difficulties, each "superseded by vectors"."""
+    tmp = tempfile.mkdtemp()
+    db = FullSQLiteManager(os.path.join(tmp, "t.db"))
+    with db._get_connection() as conn:
+        for mid in ("m1", "m2"):
+            conn.execute("INSERT INTO memories (id, memory, user_id) VALUES (?, ?, ?)", (mid, mid, "u"))
+    resolver = ContextResolver(db)
+    vocabulary = {
+        "finds_hard": {"what": "something they struggle with", "many": True},
+        "in_class": "their class",
+    }
+    labels = {"tension": "finds_hard", "vectors": "finds_hard", "11": "in_class", "12": "in_class"}
+
+    def answer(qid, q):
+        if qid.startswith("about"):
+            return {"noul": 0.95}
+        if qid.startswith("label"):
+            value = q["instructions"]["fact"].split(" | ")[-1]
+            return choice(labels[value], 0.95, [NONE_OF_THESE])
+        return choice(NEW_FACT, 0.95)
+
+    gate = FactGate(Scripted(answer), vocabulary=vocabulary, subjects=["the student"])
+    for memory_id, facts in (
+        ("m1", [fact("user", "struggles_with", "tension"), fact("user", "class", "11")]),
+        ("m2", [fact("user", "struggles_with", "vectors"), fact("user", "class", "12")]),
+    ):
+        for f in facts:
+            f.valid_from = "2026-09-2" + memory_id[-1]
+        kept, _ = gate.apply("…", facts)
+        resolver.store_engram(_engram(kept), memory_id)
+
+    with db._get_connection() as conn:
+        active = conn.execute(
+            "SELECT predicate, value FROM engram_facts WHERE superseded_by_id IS NULL ORDER BY predicate, value"
+        ).fetchall()
+    assert [(r[0], r[1]) for r in active] == [("finds_hard", "tension"), ("finds_hard", "vectors"), ("in_class", "12")]
+
+
+def test_one_slot_per_idea_but_a_shared_label_is_not_a_shared_idea():
+    lines = [
+        "What they find hard: vectors",
+        "What they find hard: resolving components",
+        "Has difficulty with: resolving components into x and y",
+    ]
+    chosen = select_relevant(Scripted(lambda qid, q: {"noul": 0.9}), "signs of components", lines, limit=5)
+    assert [c.text for c in chosen] == lines[:2]

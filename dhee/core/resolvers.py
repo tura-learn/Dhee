@@ -1226,9 +1226,13 @@ class ContextResolver:
 
                 # --- Supersede path -----------------------------------------
                 pred_lower = _normalize_predicate(fact.predicate)
-                is_single_valued = (
-                    pred_lower in _SINGLE_VALUED_PREDICATES
-                    or bool(fact.valid_from)
+                # A dated fact is treated as the new value of its predicate —
+                # unless the predicate is declared to hold many values at once.
+                # Without that exception a dated "finds_hard: vectors" retired
+                # every other difficulty the person had: measured on a student
+                # store, ten of them, each "superseded by vectors".
+                is_single_valued = pred_lower in _SINGLE_VALUED_PREDICATES or (
+                    bool(fact.valid_from) and not getattr(fact, "multi_valued", False)
                 )
                 new_fact_id = str(uuid.uuid4())
                 if is_single_valued and not fact.valid_until:
