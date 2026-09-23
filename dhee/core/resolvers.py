@@ -49,6 +49,22 @@ _NEGATIVE_STANCES = {
 }
 
 
+def _retire_undone(conn, fact, by_id: str, now_iso: str) -> None:
+    """Retire the stored facts this one says are no longer true.
+
+    Set by the fact gate (``retires_keys``) when a vocabulary declares that one
+    predicate undoes another — "finds_easy: vectors" undoing "finds_hard:
+    vectors". Superseded, never deleted, so the chain stays explorable.
+    """
+    for key in getattr(fact, "retires_keys", None) or []:
+        conn.execute(
+            """UPDATE engram_facts
+            SET valid_until = ?, superseded_by_id = ?, tier = 'avoid'
+            WHERE canonical_key = ? AND superseded_by_id IS NULL AND id != ?""",
+            (now_iso or "superseded", by_id, key, by_id),
+        )
+
+
 def _normalize_predicate(pred: str) -> str:
     return (pred or "").lower().replace(" ", "_")
 
@@ -1212,6 +1228,7 @@ class ContextResolver:
                         WHERE id = ?""",
                         (prev + 1, now_epoch, reaffirmed["id"]),
                     )
+                    _retire_undone(conn, fact, reaffirmed["id"], now_iso)
                     # Still route preference rows so the preferences store
                     # sees the reaffirmation too.
                     self._upsert_preference_row(
@@ -1231,8 +1248,12 @@ class ContextResolver:
                 # Without that exception a dated "finds_hard: vectors" retired
                 # every other difficulty the person had: measured on a student
                 # store, ten of them, each "superseded by vectors".
-                is_single_valued = pred_lower in _SINGLE_VALUED_PREDICATES or (
-                    bool(fact.valid_from) and not getattr(fact, "multi_valued", False)
+                # The declaration wins over the built-in list too: "prefers" is
+                # single-valued here for an editor, but a student can prefer
+                # short answers AND worked examples — measured, the second
+                # retired the first.
+                is_single_valued = not getattr(fact, "multi_valued", False) and (
+                    pred_lower in _SINGLE_VALUED_PREDICATES or bool(fact.valid_from)
                 )
                 new_fact_id = str(uuid.uuid4())
                 if is_single_valued and not fact.valid_until:
@@ -1284,6 +1305,8 @@ class ContextResolver:
                         1 if fact.is_derived else 0,
                     ),
                 )
+
+                _retire_undone(conn, fact, new_fact_id, now_iso)
 
                 # --- Preference routing ------------------------------------
                 self._upsert_preference_row(

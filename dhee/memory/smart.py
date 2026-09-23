@@ -81,11 +81,27 @@ class SmartMemory(CoreMemory):
                     "max_depth": self.category_config.max_category_depth,
                 },
             )
+            self._category_processor.decider_fn = self._decider
             # Load existing categories from DB
             existing = self.db.get_all_categories()
             if existing:
                 self._category_processor.load_categories(existing)
         return self._category_processor
+
+    def _decider(self):
+        """The decider for this memory's `decisions` config, or None; cached per config."""
+        config = getattr(self.config, "decisions", None)
+        if config is None or not getattr(config, "enabled", False):
+            return None
+        marker = config.model_dump_json() if hasattr(config, "model_dump_json") else repr(config)
+        cached = getattr(self, "_decider_cache", None)
+        if cached is not None and cached[0] == marker:
+            return cached[1]
+        from dhee.decisions import decider_from_config
+
+        decider = decider_from_config(config)
+        self._decider_cache = (marker, decider)
+        return decider
 
     @property
     def knowledge_graph(self):

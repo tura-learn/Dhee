@@ -25,7 +25,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from dhee.utils.math import cosine_similarity as _cosine_similarity
 
@@ -257,6 +257,10 @@ class CategoryProcessor:
         self.llm = llm
         self.embedder = embedder
         self.config = config or {}
+        #: Returns a decider (see `dhee.decisions`) or None. Set by the memory
+        #: that owns this processor, and read on every call so a decisions
+        #: config applied after construction takes effect.
+        self.decider_fn: Optional[Callable[[], Any]] = None
 
         # In-memory category cache (persisted to DB by Memory class)
         self.categories: Dict[str, Category] = {}
@@ -345,7 +349,15 @@ class CategoryProcessor:
                 confidence=best_score,
             )
 
-        # Phase 3: Use LLM for detection/creation
+        # Phase 3: a decision among the categories that already exist. Picking
+        # one of a known list is a closed choice, not writing; the LLM is kept
+        # for the case the decision says none fits, where a new category has
+        # to be named.
+        decided = self._decide_category(content)
+        if decided is not None:
+            return decided
+
+        # Phase 4: Use LLM for detection/creation
         if use_llm and self.llm:
             return self._llm_detect_category(content, metadata)
 
@@ -422,6 +434,34 @@ class CategoryProcessor:
     def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
         """Calculate cosine similarity between two vectors."""
         return _cosine_similarity(vec1, vec2)
+
+    def _decide_category(self, content: str) -> Optional["CategoryMatch"]:
+        decider = self.decider_fn() if self.decider_fn else None
+        if decider is None or not self.categories:
+            return None
+        from dhee.decisions.jev import ranked
+
+        criteria = {
+            cat.id: f"{cat.name}: {cat.description}"[:200] for cat in list(self.categories.values())[:200]
+        }
+        criteria["new_category"] = "None of these fits; it needs a category of its own."
+        answers = decider.decide(
+            {"memory": content[:1500]},
+            {
+                "category": {
+                    "type": "choice",
+                    "instructions": "Which category does this memory belong in?",
+                    "criteria": criteria,
+                }
+            },
+        )
+        top = ranked(answers, "category")
+        if not top or top[0][0] == "new_category" or top[0][1] < 0.6:
+            return None
+        cat = self.categories.get(top[0][0])
+        if cat is None:
+            return None
+        return CategoryMatch(category_id=cat.id, category_name=cat.name, confidence=top[0][1])
 
     def _llm_detect_category(
         self,

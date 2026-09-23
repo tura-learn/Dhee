@@ -359,6 +359,12 @@ class MemoryWritePipeline:
         engram_extractor = self._engram_extractor
         if not engram_extractor:
             return False, False, None
+        if self._already_extracted(memory_id):
+            # The write already extracted this memory; the enrichment pass used
+            # to extract it again. Measured on a simulated student: every
+            # conversation paid for extraction twice, and the second pass wrote
+            # a paraphrase of a fact the first had stored.
+            return True, True, None
 
         try:
             session_ctx = None
@@ -392,10 +398,44 @@ class MemoryWritePipeline:
                     memory_id,
                     user_id or "default",
                 )
+            self._mark_extracted(memory_id)
             return True, True, engram
         except Exception as exc:
             logger.warning("Engram extraction failed for %s: %s", memory_id, exc)
             return True, False, None
+
+    def _already_extracted(self, memory_id: Optional[str]) -> bool:
+        if not memory_id:
+            return False
+        try:
+            with self._db._get_connection() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS engram_extractions "
+                    "(memory_id TEXT PRIMARY KEY, extracted_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+                )
+                return (
+                    conn.execute(
+                        "SELECT 1 FROM engram_extractions WHERE memory_id = ?", (memory_id,)
+                    ).fetchone()
+                    is not None
+                )
+        except Exception:  # noqa: BLE001 - an unreadable ledger never blocks a write
+            return False
+
+    def _mark_extracted(self, memory_id: Optional[str]) -> None:
+        if not memory_id:
+            return
+        try:
+            with self._db._get_connection() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS engram_extractions "
+                    "(memory_id TEXT PRIMARY KEY, extracted_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO engram_extractions (memory_id) VALUES (?)", (memory_id,)
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug("could not record extraction of %s", memory_id)
 
     def _fact_gate(self):
         """The configured fact gate, or None. Built once per decisions config."""

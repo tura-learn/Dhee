@@ -40,6 +40,15 @@ NEW_FACT = "new_fact"
 #: At most this many stored values are offered when judging "restates which?".
 MAX_EXISTING = 12
 
+#: How sure a retirement must be. Set from nine measured pairs: every
+#: must-retire pair scored 0.66 or more, every must-not pair 0.05 or less, and
+#: the one genuinely ambiguous pair (torque easy vs rotational motion hard) 0.40.
+RETIRE_FLOOR = 0.6
+
+#: How sure a label must be before a fact whose subject is a thing — "JEE Main |
+#: scheduled_in | April" — is asked about again as a fact about the person.
+RELABEL_SUBJECT_FLOOR = 0.8
+
 
 @dataclass
 class GateReport:
@@ -50,6 +59,7 @@ class GateReport:
     relabelled: int = 0
     dropped_unlabelled: int = 0
     merged: int = 0
+    retiring: int = 0
     decided: bool = False
     notes: List[str] = field(default_factory=list)
 
@@ -124,6 +134,7 @@ class FactGate:
 
         if existing is not None and kept:
             report.merged = self._merge_restatements(kept, existing)
+            report.retiring = self._mark_retirements(kept, existing)
         report.kept = len(kept)
         return kept, report
 
@@ -157,9 +168,35 @@ class FactGate:
                         ],
                     },
                 }
+                # Asked separately from "about the person", because a fact can be
+                # about them and still not be something they said. Measured: two
+                # questions a student asked out of curiosity ("why is tension the
+                # same throughout the string?") came back from the extractor as
+                # `finds_hard`, passed "about the person", and scored 0.30 here —
+                # against 0.95 for "friction problems are killing me".
+                questions[f"support_{index}"] = {
+                    "type": "noul",
+                    "instructions": {
+                        "fact_id": str(index),
+                        "fact": stated,
+                        "question": (
+                            "Does the text show THIS FACT about the person — they said it, or "
+                            "their own words or answers clearly show it?"
+                        ),
+                        "false_when": [
+                            "the person only asked a question about the topic, out of curiosity or to understand it",
+                            "it is something someone else explained, not something the person said or showed",
+                            "it reads more into their words than they said",
+                        ],
+                    },
+                }
             if self.vocabulary:
                 criteria = {
-                    name: ({k: v for k, v in meaning.items() if k != "many"} if isinstance(meaning, dict) else meaning)
+                    name: (
+                        {k: v for k, v in meaning.items() if k not in ("many", "retires")}
+                        if isinstance(meaning, dict)
+                        else meaning
+                    )
                     for name, meaning in self.vocabulary.items()
                 }
                 criteria[NONE_OF_THESE] = "The fact fits none of these relations."
@@ -191,6 +228,10 @@ class FactGate:
         out: List[Tuple[Optional[float], Optional[str]]] = []
         for index, fact in enumerate(facts):
             about = noul(answers, f"about_{index}") if self.subjects else None
+            support = noul(answers, f"support_{index}") if self.subjects else None
+            if about is not None and support is not None:
+                # Both must hold; the weaker of the two decides.
+                about = min(about, support)
             label: Optional[str] = fact.predicate
             if self.vocabulary:
                 top = ranked(answers, f"label_{index}")
@@ -203,6 +244,46 @@ class FactGate:
                 else:
                     label = None
             out.append((about, label))
+        return self._second_look(content, facts, out, answers)
+
+    def _second_look(self, content, facts, judged, answers):
+        """Ask again about facts filed under a thing but labelled as the person's.
+
+        The extractor writes "JEE Main | scheduled_in | April" for "my JEE got
+        moved to April". Asked whether that is a fact about the person, the
+        model says no (0.04, measured) — its subject is an exam — though the
+        label it gives it with confidence is `exam_on`. Restated as the
+        person's fact, it is asked once more. Only such facts pay for this.
+        """
+        if not self.subjects or not self.vocabulary:
+            return judged
+        retry: Dict[int, str] = {}
+        for index, (about, label) in enumerate(judged):
+            if about is None or about >= self.about_floor or not label:
+                continue
+            top = ranked(answers, f"label_{index}")
+            if top and top[0][0] == label and top[0][1] >= RELABEL_SUBJECT_FLOOR:
+                retry[index] = f"{self.canonical_subject} | {label} | {facts[index].value}"
+        if not retry:
+            return judged
+        questions = {}
+        for index, stated in retry.items():
+            questions[f"again_{index}"] = {
+                "type": "noul",
+                "instructions": {
+                    "fact": stated,
+                    "question": "Does the text show THIS FACT about the person — they said it, or their own words clearly show it?",
+                    "false_when": ["the person only asked a question about the topic", "someone else said it"],
+                },
+            }
+        again = self.decider.decide({"facts": retry, "text": _clip(content, 3000)}, questions)
+        if again is None:
+            return judged
+        out = list(judged)
+        for index in retry:
+            p = noul(again, f"again_{index}")
+            if p is not None and p >= self.about_floor:
+                out[index] = (p, judged[index][1])
         return out
 
     def _merge_restatements(self, facts: List[Any], existing: ExistingLookup) -> int:
@@ -222,19 +303,30 @@ class FactGate:
                 # Identical up to case and spacing: arithmetic, not a decision.
                 fact.value, fact.canonical_key = same[0][0], same[0][1] or fact.canonical_key
                 continue
+            meaning = self.vocabulary.get(fact.predicate)
+            if self.vocabulary and not (isinstance(meaning, dict) and meaning.get("many")):
+                # A predicate with one value at a time: a different value is an
+                # update, and storage supersedes the old one. Asking "same
+                # topic?" here merged "class 12" into "class 11" — measured.
+                continue
             offered[index] = stored
             criteria = {f"stored_{k}": value for k, (value, _key) in enumerate(stored)}
-            criteria[NEW_FACT] = "Something none of the stored values already says."
+            criteria[NEW_FACT] = "A different topic from every stored value."
             questions[f"same_{index}"] = {
                 "type": "choice",
                 "instructions": {
                     "relation": f"{fact.subject} {fact.predicate}",
                     "new_value": fact.value,
+                    # Measured on "friction on inclines" against a stored
+                    # "friction problems": asked whether the new value adds
+                    # anything, the model said new (0.90) — it does add a
+                    # detail — and a term of study grew one row per sub-case.
+                    # Asked whether it is the same topic, it merged (0.93).
                     "question": (
-                        "Is the new value already said by one of the stored values — the same "
-                        "thing reworded, abbreviated, or only slightly more or less specific — "
-                        "so that someone reading the stored list learns nothing new from it? "
-                        "Pick that stored value, or new_fact if it adds something."
+                        "Is the new value about the SAME topic as one of the stored values — "
+                        "the same thing reworded, or the same topic named more or less "
+                        "specifically (a sub-case, a situation, an example of it)? Pick that "
+                        "stored value; pick new_fact only for a different topic."
                     ),
                 },
                 "criteria": criteria,
@@ -266,6 +358,78 @@ class FactGate:
                 facts[index].canonical_key = key or facts[index].canonical_key
                 merged += 1
         return merged
+
+
+    def _mark_retirements(self, facts: List[Any], existing: ExistingLookup) -> int:
+        """Mark stored facts a new one says are no longer true.
+
+        A vocabulary can say that one predicate undoes another — "finds_easy"
+        retires "finds_hard". Measured before this: a student who said
+        "vectors are fine now" kept `finds_hard: vectors` beside
+        `finds_easy: vectors`, and a tutor was handed both. The new fact carries
+        the canonical keys it retires; storage stamps them superseded by it.
+
+        One yes/no per stored value, not one pick among them: a student store
+        held "vectors", "resolving into components" and "vectors (resolving
+        into components)", and a single choice retired the first and left the
+        other two in front of the tutor for the rest of the term.
+        """
+        questions: Dict[str, Any] = {}
+        pending: Dict[str, Tuple[int, str]] = {}
+        state: Dict[str, Any] = {}
+        for index, fact in enumerate(facts):
+            meaning = self.vocabulary.get(fact.predicate)
+            targets = meaning.get("retires") if isinstance(meaning, dict) else None
+            if not targets:
+                continue
+            for target in [targets] if isinstance(targets, str) else list(targets):
+                try:
+                    stored = existing(fact.subject, target)[:MAX_EXISTING]
+                except Exception:  # noqa: BLE001
+                    stored = []
+                for k, (value, key) in enumerate(stored):
+                    key = key or f"{fact.subject}|{target}|{value}"
+                    if _norm(value) == _norm(fact.value):
+                        _add_retirement(fact, key)
+                        continue
+                    qid = f"undo_{index}_{target}_{k}"
+                    pending[qid] = (index, key)
+                    state[qid] = {
+                        "new_fact": f"{fact.subject} {fact.predicate} {fact.value}",
+                        "stored_fact": f"{fact.subject} {target} {value}",
+                    }
+                    questions[qid] = {
+                        "type": "noul",
+                        "instructions": {
+                            "new_fact": f"{fact.subject} {fact.predicate} {fact.value}",
+                            "stored_fact": f"{fact.subject} {target} {value}",
+                            # Measured over nine pairs: must-retire pairs 0.66-0.93,
+                            # must-not pairs 0.03-0.05. The earlier wording ("no
+                            # longer true, now the other way round?") scored the
+                            # clearest must-retire pair 0.22.
+                            "question": (
+                                "The person now finds the new fact's topic easy (or hard). Is "
+                                "the stored fact about that same topic or a part of it, so that "
+                                "it no longer holds?"
+                            ),
+                        },
+                    }
+        if questions:
+            answers = self.decider.decide(state, questions)
+            floor = RETIRE_FLOOR
+            if answers is not None:
+                for qid, (index, key) in pending.items():
+                    p = noul(answers, qid)
+                    if p is not None and p >= floor:
+                        _add_retirement(facts[index], key)
+        return sum(1 for f in facts if getattr(f, "retires_keys", None))
+
+
+def _add_retirement(fact: Any, canonical_key: str) -> None:
+    keys = list(getattr(fact, "retires_keys", None) or [])
+    if canonical_key and canonical_key not in keys:
+        keys.append(canonical_key)
+    fact.retires_keys = keys
 
 
 def fact_gate_from_config(config: Any, decider: Optional[Decider]) -> Optional[FactGate]:

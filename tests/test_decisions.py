@@ -31,9 +31,9 @@ from dhee.decisions import (
 from dhee.decisions.facts import NEW_FACT, NONE_OF_THESE
 
 VOCABULARY = {
-    "finds_hard": "a topic or skill the person struggles with",
+    "finds_hard": {"what": "a topic or skill the person struggles with", "many": True},
     "preparing_for": "an exam or goal they are working towards",
-    "prefers": "how they like to be taught or to work",
+    "prefers": {"what": "how they like to be taught or to work", "many": True},
 }
 
 
@@ -144,6 +144,17 @@ def test_a_restated_fact_points_at_the_stored_one():
     assert kept[0].value == "tension in strings"
     assert kept[0].canonical_key == "user|finds_hard|tension in strings"
     assert report.merged == 1
+
+
+def test_a_single_valued_predicate_is_updated_not_merged():
+    """ "class 12" is not a restatement of "class 11"; it replaces it."""
+    decider = Scripted(lambda qid, q: {"noul": 0.9} if not qid.startswith("label") else choice("preparing_for", 0.9))
+    gate = FactGate(decider, vocabulary=VOCABULARY, subjects=["the student"])
+    kept, report = gate.apply(
+        "…", [fact("user", "preparing_for", "JEE Advanced")], existing=lambda s, p: [("JEE Main", "k")]
+    )
+    assert kept[0].value == "JEE Advanced" and report.merged == 0
+    assert not any(qid.startswith("same") for qid in decider.calls[-1][1])
 
 
 def test_identical_values_merge_without_asking():
@@ -356,9 +367,11 @@ def test_a_dated_fact_does_not_wipe_a_predicate_that_holds_many_values():
     resolver = ContextResolver(db)
     vocabulary = {
         "finds_hard": {"what": "something they struggle with", "many": True},
+        "prefers": {"what": "how they like to learn", "many": True},
         "in_class": "their class",
     }
-    labels = {"tension": "finds_hard", "vectors": "finds_hard", "11": "in_class", "12": "in_class"}
+    labels = {"tension": "finds_hard", "vectors": "finds_hard", "11": "in_class", "12": "in_class",
+              "short answers": "prefers", "worked examples": "prefers"}
 
     def answer(qid, q):
         if qid.startswith("about"):
@@ -370,8 +383,10 @@ def test_a_dated_fact_does_not_wipe_a_predicate_that_holds_many_values():
 
     gate = FactGate(Scripted(answer), vocabulary=vocabulary, subjects=["the student"])
     for memory_id, facts in (
-        ("m1", [fact("user", "struggles_with", "tension"), fact("user", "class", "11")]),
-        ("m2", [fact("user", "struggles_with", "vectors"), fact("user", "class", "12")]),
+        ("m1", [fact("user", "struggles_with", "tension"), fact("user", "class", "11"),
+                fact("user", "likes", "short answers")]),
+        ("m2", [fact("user", "struggles_with", "vectors"), fact("user", "class", "12"),
+                fact("user", "likes", "worked examples")]),
     ):
         for f in facts:
             f.valid_from = "2026-09-2" + memory_id[-1]
@@ -382,7 +397,14 @@ def test_a_dated_fact_does_not_wipe_a_predicate_that_holds_many_values():
         active = conn.execute(
             "SELECT predicate, value FROM engram_facts WHERE superseded_by_id IS NULL ORDER BY predicate, value"
         ).fetchall()
-    assert [(r[0], r[1]) for r in active] == [("finds_hard", "tension"), ("finds_hard", "vectors"), ("in_class", "12")]
+    assert [(r[0], r[1]) for r in active] == [
+        ("finds_hard", "tension"),
+        ("finds_hard", "vectors"),
+        ("in_class", "12"),
+        # `prefers` is on the built-in single-valued list; `many` still wins.
+        ("prefers", "short answers"),
+        ("prefers", "worked examples"),
+    ]
 
 
 def test_one_slot_per_idea_but_a_shared_label_is_not_a_shared_idea():
@@ -393,3 +415,120 @@ def test_one_slot_per_idea_but_a_shared_label_is_not_a_shared_idea():
     ]
     chosen = select_relevant(Scripted(lambda qid, q: {"noul": 0.9}), "signs of components", lines, limit=5)
     assert [c.text for c in chosen] == lines[:2]
+
+
+def test_getting_better_at_something_retires_finding_it_hard():
+    """Measured on a simulated term: "vectors are fine now" left
+    `finds_hard: vectors` standing beside `finds_easy: vectors`."""
+    tmp = tempfile.mkdtemp()
+    db = FullSQLiteManager(os.path.join(tmp, "t.db"))
+    with db._get_connection() as conn:
+        for mid in ("m1", "m2"):
+            conn.execute("INSERT INTO memories (id, memory, user_id) VALUES (?, ?, ?)", (mid, mid, "u"))
+    resolver = ContextResolver(db)
+    vocabulary = {
+        "finds_hard": {"what": "hard for them", "many": True, "retires": "finds_easy"},
+        "finds_easy": {"what": "clicked", "many": True, "retires": "finds_hard"},
+    }
+
+    def answer(qid, q):
+        if qid.startswith("about"):
+            return {"noul": 0.95}
+        if qid.startswith("label"):
+            said = q["instructions"]["fact"]
+            return choice("finds_easy" if "fine" in said else "finds_hard", 0.95, [NONE_OF_THESE])
+        if qid.startswith("undo"):
+            return {"noul": 0.92 if "vectors" in q["instructions"]["stored_fact"] else 0.05}
+        return choice(NEW_FACT, 0.95)
+
+    gate = FactGate(Scripted(answer), vocabulary=vocabulary, subjects=["the student"])
+
+    def existing(subject, predicate):
+        with db._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT value, canonical_key FROM engram_facts WHERE subject=? AND predicate=? "
+                "AND superseded_by_id IS NULL",
+                (subject, predicate),
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    kept, _ = gate.apply(
+        "…",
+        [fact("user", "struggles_with", "vectors"), fact("user", "struggles_with", "friction"),
+         fact("user", "struggles_with", "vectors (resolving into components)")],
+        existing,
+    )
+    resolver.store_engram(_engram(kept), "m1")
+    kept, report = gate.apply("…", [fact("user", "fine_with", "vector components")], existing)
+    resolver.store_engram(_engram(kept), "m2")
+
+    with db._get_connection() as conn:
+        active = conn.execute(
+            "SELECT predicate, value FROM engram_facts WHERE superseded_by_id IS NULL ORDER BY predicate"
+        ).fetchall()
+    assert [(r[0], r[1]) for r in active] == [("finds_easy", "vector components"), ("finds_hard", "friction")]
+    assert report.retiring == 1
+
+
+def test_a_category_is_picked_by_decision_before_any_llm_is_asked():
+    from dhee.core.category import CategoryProcessor
+
+    llm = MagicMock()
+    processor = CategoryProcessor(llm=llm, embedder=None, config={"use_llm": True})
+    assert processor.categories, "the default categories load"
+    target = next(iter(processor.categories))
+    processor.decider_fn = lambda: Scripted(lambda qid, q: choice(target, 0.92, ["new_category"]))
+    match = processor.detect_category("zzqx unmatched words", use_llm=True)
+    assert match.category_id == target
+    llm.generate.assert_not_called()
+
+    # "None fits" hands the case to the LLM, which can name a new category.
+    processor.decider_fn = lambda: Scripted(lambda qid, q: choice("new_category", 0.9, [target]))
+    llm.generate.return_value = "{}"
+    processor.detect_category("zzqx unmatched words", use_llm=True)
+    llm.generate.assert_called()
+
+
+def test_a_memory_is_extracted_once_whoever_asks_again():
+    """The enrichment pass re-extracted memories the write had already
+    extracted: twice the cost, and a paraphrased duplicate each time."""
+    from dhee.memory.write_pipeline import MemoryWritePipeline as WritePipeline
+
+    tmp = tempfile.mkdtemp()
+    pipeline = WritePipeline.__new__(WritePipeline)
+    pipeline._db = FullSQLiteManager(os.path.join(tmp, "t.db"))
+    calls = []
+
+    class Extractor:
+        def extract(self, **kwargs):
+            calls.append(kwargs["content"])
+            return SimpleNamespace(facts=[], prospective_scenes=[])
+
+    pipeline._engram_extractor_fn = lambda: Extractor()
+    pipeline._config = SimpleNamespace(decisions=None, prospective_scene=SimpleNamespace(enable_prospective_scenes=False))
+    pipeline._context_resolver_fn = None
+    for _ in range(3):
+        attempted, succeeded, _ = pipeline._run_engram_extraction(
+            memory_id="m1", content="I find vectors hard", mem_metadata={}, user_id="u"
+        )
+        assert attempted and succeeded
+    assert calls == ["I find vectors hard"]
+
+
+def test_a_fact_filed_under_a_thing_is_asked_again_as_the_persons():
+    """ "JEE Main | scheduled_in | April": the subject is the exam, the fact is
+    the student's exam date. Measured: about-the-person 0.04, label exam_on."""
+    def answer(qid, q):
+        if qid.startswith(("about", "support")):
+            return {"noul": 0.04}
+        if qid.startswith("label"):
+            return choice("exam_on", 0.9, [NONE_OF_THESE])
+        if qid.startswith("again"):
+            assert q["instructions"]["fact"] == "user | exam_on | April"
+            return {"noul": 0.9}
+        return choice(NEW_FACT, 0.9)
+
+    vocabulary = dict(VOCABULARY, exam_on="the date of their exam")
+    gate = FactGate(Scripted(answer), vocabulary=vocabulary, subjects=["the student"])
+    kept, report = gate.apply("my JEE got moved to April", [fact("JEE Main", "scheduled_in", "April")])
+    assert [(f.subject, f.predicate, f.value) for f in kept] == [("user", "exam_on", "April")]

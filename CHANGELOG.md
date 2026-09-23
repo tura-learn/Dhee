@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.4.2] - 2026-09-23 - Tested over a simulated hundred days
+
+Everything here was found by running one simulated student through a hundred
+days of conversations — their class, exam date, difficulties and preferences
+changing along the way — and scoring the store against the truth at days 1, 50
+and 100. Before these fixes, day 100 had 3 stale facts active and 3 leaking into
+what a tutor was handed; after, 14 of 14 current facts, none stale, none leaked.
+
+- **`many` beats the built-in single-valued list.** "prefers: worked examples"
+  was retiring "prefers: short explanations".
+- **`retires`: one predicate can undo another.** A vocabulary entry can say
+  `"retires": "finds_hard"`; the gate asks, per stored value, whether the new
+  fact undoes it (must-retire pairs scored 0.66-0.93, must-not 0.03-0.05), and
+  storage supersedes what it does. "Vectors are fine now" had left
+  `finds_hard: vectors` standing.
+- **A `support` check.** A fact can be about the person without being
+  something they said: questions asked out of curiosity came back from the
+  extractor as `finds_hard` (support 0.30 vs 0.95 for a real difficulty).
+- **Same-topic merging only for many-valued predicates.** "class 12" was being
+  merged into "class 11" instead of replacing it.
+- **A second look for facts filed under a thing.** "JEE Main | scheduled_in |
+  April" scored 0.04 as a fact about the person while being confidently
+  labelled `exam_on`; restated as the person's fact it is asked again.
+- **A memory is extracted once.** The enrichment pass re-ran extraction on
+  memories the write had already extracted — twice the cost of the largest call
+  per write, and a paraphrased duplicate each time. An `engram_extractions`
+  ledger records success; failures are still retried.
+- **Categories by decision.** Picking one of the existing categories is now a
+  Choice when decisions are on; the LLM is asked only when none fits.
+
+Measured per written conversation with a student configuration: ~$0.0008 and
+about 45s in the background, against ~5 LLM calls and 13 embeddings before.
+
 ## [7.4.1] - 2026-09-23 - A dated fact no longer wipes a list
 
 - **A predicate can hold many values.** `store_engram` treated any fact with a
