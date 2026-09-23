@@ -167,6 +167,18 @@ class EngramExtractor:
             content=content[:16000],
             session_context_block=session_block,
         )
+        vocabulary = getattr(self, "vocabulary", None) or {}
+        if vocabulary:
+            # A reader joins on predicates. Given the words it reads, the model
+            # uses them; left to itself it invents a new one per sentence.
+            listed = "\n".join(
+                f"- {name}: {meaning.get('what', meaning) if isinstance(meaning, dict) else meaning}"
+                for name, meaning in vocabulary.items()
+            )
+            prompt += (
+                "\n- For facts about the user, use ONLY these predicates, and skip a fact "
+                "about the user that fits none of them:\n" + listed
+            )
 
         try:
             # Temporarily increase max_tokens for extraction — the structured

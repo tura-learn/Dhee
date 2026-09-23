@@ -4,6 +4,66 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.4.0] - 2026-09-23 - Decisions: memory that judges before it stores and before it speaks
+
+Several steps in Dhee were never generation. Is this fact about the person?
+Which label does it take? Does it restate something already stored? Which of
+these memories would change the next reply? Each was either answered by asking
+an LLM and parsing a verdict out of prose, or not asked at all. They are now
+answered by a decision model — TypeSafe's Jev, which returns a calibrated
+probability per option in well under a second — behind a new, opt-in
+`MemoryConfig.decisions` section. Off by default; every failure falls back to
+the previous behaviour.
+
+Measured on real student stores before the change: 81 of 186 facts were not
+about the student, 2 of 105 facts about the student used a predicate any reader
+joined on, and one difficulty was stored eight ways.
+
+- **`dhee.decisions`** — `JevDecider` (OpenRouter's `/api/alpha/decisions` or
+  TypeSafe's `/v1/systemone`; never raises, never retries, `DHEE_DECISIONS=off`
+  switches it off process-wide) and the `Decider` protocol for any other.
+- **The fact gate** (`FactGate`), wired between extraction and storage in the
+  write pipeline. With `fact_subjects` set, facts not about the subject are not
+  stored; with `fact_vocabulary` set, every fact is filed under one of its
+  predicates or not stored; and a fact that restates a stored one is pointed at
+  it, so storage reaffirms instead of inserting. Replayed over a real store:
+  267 facts became 42 labelled ones, and a run of 39 restatements became 12.
+  The facts go in the decision's *state*, not only its questions — with the
+  source text alone as state the model judged the text, not the fact.
+- **The extractor is told the vocabulary** when one is configured.
+- **`select_relevant`** — the read gate: candidate memories in, one Noul per
+  candidate ("would knowing this change the next reply?"), only what clears the
+  floor out, one slot per idea.
+- **`regate_facts`** — puts a store that grew without the gate through it once:
+  retires what is not about the subject, relabels, merges restatements into the
+  first way a thing was said. Nothing is deleted; `dry_run` writes nothing. A
+  real store went from 293 active facts to 22.
+- **Distillation no longer re-distils a day on every run.** The sleep cycle
+  targets yesterday and runs every few minutes, and nothing recorded which
+  episodes had been read: one student store distilled the same 9 episodes 11
+  times in a morning into 98 near-identical memories. A `distilled_episodes`
+  ledger (plus existing provenance) now marks every episode once its batch is
+  processed, and a run with no new episodes is skipped.
+
+## [7.3.1] - 2026-08-26 - Embeddings ask for floats
+
+- **`OpenAIEmbedder` now sends `encoding_format` explicitly, defaulting to
+  `float`.** It never sent the field at all, which is not the same as sending
+  nothing: recent versions of the OpenAI SDK fill it in themselves with
+  `base64` as a payload optimisation. Providers that do not implement base64 —
+  OpenRouter's Nvidia embedding models among them — answer `400 Nvidia
+  embeddings do not support base64 encoding_format`, once per chunk, forever.
+  The failure is caught and logged rather than raised, so the visible symptom
+  is not an error but an index that silently never fills: memory reports
+  `ready` and contains nothing.
+
+  `float` is what the API documents as its default and what every
+  implementation accepts, and the SDK decodes both encodings to the same list
+  of floats, so nothing downstream can tell the difference. `embeddings/nvidia.py`
+  has always passed it; this is the same fix on the generic client, which is
+  what a compatible provider actually uses. Override via
+  `config["encoding_format"]` if a provider ever wants otherwise.
+
 ## [7.3.0] - 2026-07-29 - Document corpus lane
 
 - **New `dhee.corpus` package: a third lane beside beliefs and world memory.**

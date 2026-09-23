@@ -2728,6 +2728,53 @@ class SQLiteAnalyticsMixin:
                     (str(uuid.uuid4()), semantic_memory_id, ep_id, run_id),
                 )
 
+    def _ensure_distilled_episodes_table(self, conn) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS distilled_episodes (
+                episodic_memory_id TEXT PRIMARY KEY,
+                distillation_run_id TEXT,
+                distilled_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+    def distilled_episode_ids(self, episodic_memory_ids: List[str]) -> set:
+        """Which of these episodes a distillation has already read.
+
+        An episode counts as read when a batch containing it finished — whether
+        or not that batch produced anything — or when a semantic memory already
+        names it as a source. Without this, a sleep cycle that runs every few
+        minutes distils the same day again on every run, and each run stores
+        its paraphrases as new memories.
+        """
+        ids = [str(i) for i in episodic_memory_ids if i]
+        if not ids:
+            return set()
+        found: set = set()
+        with self._get_connection() as conn:
+            self._ensure_distilled_episodes_table(conn)
+            for start in range(0, len(ids), 500):
+                chunk = ids[start : start + 500]
+                marks = ",".join("?" for _ in chunk)
+                for table in ("distilled_episodes", "distillation_provenance"):
+                    rows = conn.execute(
+                        f"SELECT DISTINCT episodic_memory_id FROM {table} "
+                        f"WHERE episodic_memory_id IN ({marks})",
+                        chunk,
+                    ).fetchall()
+                    found.update(str(row[0]) for row in rows)
+        return found
+
+    def mark_episodes_distilled(self, episodic_memory_ids: List[str], run_id: str) -> None:
+        with self._get_connection() as conn:
+            self._ensure_distilled_episodes_table(conn)
+            conn.executemany(
+                "INSERT OR IGNORE INTO distilled_episodes (episodic_memory_id, distillation_run_id) "
+                "VALUES (?, ?)",
+                [(str(i), run_id) for i in episodic_memory_ids if i],
+            )
+
     def get_distillation_sources(
         self, semantic_memory_id: str
     ) -> List[Dict[str, Any]]:

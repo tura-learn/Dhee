@@ -480,6 +480,40 @@ class ProspectiveSceneConfig(BaseModel):
     surface_on_context_load: bool = True    # check on session start
 
 
+class DecisionConfig(BaseModel):
+    """Typed decisions: the closed choices Dhee makes without writing prose.
+
+    Several steps in the write path are not generation at all — is this fact
+    about the person, which label does it take, does it restate something
+    already stored — and asking an LLM for them means parsing a verdict out of
+    free text. A decision model (TypeSafe's Jev) answers each as a calibrated
+    probability in well under a second. Off by default: with no decider the
+    pipeline behaves exactly as before, and every decider failure falls back
+    to that behaviour too.
+    """
+    enabled: bool = False
+    #: ``openrouter`` (``/api/alpha/decisions``) or ``typesafe`` (``/v1/systemone``).
+    provider: str = "openrouter"
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    api_key_env: Optional[str] = None
+    model: Optional[str] = None
+    timeout_seconds: float = 6.0
+    #: Controlled vocabulary for facts about the subject: predicate -> meaning.
+    #: A meaning is a sentence, or an object such as ``{"what": ..., "not_for":
+    #: ...}`` when a boundary between two predicates needs stating. Empty means
+    #: predicates are left as the extractor wrote them.
+    fact_vocabulary: Dict[str, Any] = Field(default_factory=dict)
+    #: Who the facts are about. When set, facts judged not to be about them
+    #: (general knowledge, the assistant, bookkeeping) are not stored.
+    fact_subjects: List[str] = Field(default_factory=list)
+    #: The subject name stored for facts about them, whatever the extractor wrote.
+    canonical_subject: str = "user"
+    about_floor: float = 0.5
+    label_floor: float = 0.5
+    same_floor: float = 0.7
+
+
 class EngramExtractionConfig(BaseModel):
     """Configuration for structured engram extraction."""
     enable_extraction: bool = True
@@ -671,6 +705,7 @@ class MemoryConfig(BaseModel):
     cognition: CognitionConfig = Field(default_factory=CognitionConfig)
     prospective_scene: ProspectiveSceneConfig = Field(default_factory=ProspectiveSceneConfig)
     engram_extraction: EngramExtractionConfig = Field(default_factory=EngramExtractionConfig)
+    decisions: DecisionConfig = Field(default_factory=DecisionConfig)
 
     @field_validator("embedding_model_dims")
     @classmethod

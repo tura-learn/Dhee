@@ -364,6 +364,12 @@ class MemoryWritePipeline:
             session_ctx = None
             if context_messages:
                 session_ctx = {"recent_messages": context_messages[-5:]}
+            decisions = getattr(self._config, "decisions", None)
+            engram_extractor.vocabulary = (
+                dict(decisions.fact_vocabulary)
+                if decisions is not None and getattr(decisions, "enabled", False)
+                else {}
+            )
             engram = engram_extractor.extract(
                 content=content,
                 session_context=session_ctx,
@@ -372,6 +378,8 @@ class MemoryWritePipeline:
                 strict_llm_failure=strict_llm_failure,
             )
             context_resolver = self._context_resolver
+            if engram is not None and getattr(engram, "facts", None):
+                engram.facts = self._gate_facts(content, list(engram.facts), context_resolver)
             if context_resolver and engram:
                 context_resolver.store_engram(engram, memory_id)
             if (
@@ -388,6 +396,68 @@ class MemoryWritePipeline:
         except Exception as exc:
             logger.warning("Engram extraction failed for %s: %s", memory_id, exc)
             return True, False, None
+
+    def _fact_gate(self):
+        """The configured fact gate, or None. Built once per decisions config."""
+        config = getattr(self._config, "decisions", None)
+        if config is None or not getattr(config, "enabled", False):
+            return None
+        marker = id(config), config.model_dump_json() if hasattr(config, "model_dump_json") else ""
+        cached = getattr(self, "_fact_gate_cache", None)
+        if cached is not None and cached[0] == marker:
+            return cached[1]
+        from dhee.decisions import decider_from_config, fact_gate_from_config
+
+        gate = fact_gate_from_config(config, decider_from_config(config))
+        self._fact_gate_cache = (marker, gate)
+        return gate
+
+    def _gate_facts(self, content: str, facts: List[Any], context_resolver: Any) -> List[Any]:
+        """Run extracted facts through the decision gate before they are stored.
+
+        Never loses a write: with no gate, or a gate that cannot decide, the
+        facts go to storage exactly as the extractor wrote them.
+        """
+        gate = self._fact_gate()
+        if gate is None or not facts:
+            return facts
+
+        def existing(subject: str, predicate: str) -> List[Tuple[str, str]]:
+            db = getattr(context_resolver, "db", None)
+            if db is None:
+                return []
+            with db._get_connection() as conn:
+                rows = conn.execute(
+                    """SELECT value, canonical_key FROM engram_facts
+                    WHERE subject = ? AND predicate = ? AND superseded_by_id IS NULL
+                    ORDER BY created_at DESC LIMIT 24""",
+                    (subject, predicate),
+                ).fetchall()
+            seen: set = set()
+            out: List[Tuple[str, str]] = []
+            for row in rows:
+                value = str(row[0] or "")
+                if value and value not in seen:
+                    seen.add(value)
+                    out.append((value, str(row[1] or "")))
+            return out
+
+        try:
+            kept, report = gate.apply(content, facts, existing)
+        except Exception as exc:  # noqa: BLE001 - a gate never costs a write
+            logger.warning("Fact gate failed; storing facts as extracted: %s", exc)
+            return facts
+        if report.decided:
+            logger.info(
+                "Fact gate: kept %d of %d (off-subject %d, unlabelled %d, relabelled %d, restated %d)",
+                report.kept,
+                len(facts),
+                report.dropped_off_subject,
+                report.dropped_unlabelled,
+                report.relabelled,
+                report.merged,
+            )
+        return kept
 
     def _store_operational_event(
         self,

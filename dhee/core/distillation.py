@@ -84,14 +84,29 @@ class ReplayDistiller:
             limit=self.config.distillation_batch_size * 5,
         )
 
-        if len(episodes) < self.config.distillation_min_episodes:
+        # Only episodes no earlier run has read. The cycle runs every few
+        # minutes and targets a whole day, so without this it distils the same
+        # day on every run — measured on a student store: the same 9 episodes
+        # distilled 11 times in a morning into 98 near-identical memories.
+        already = set()
+        seen_fn = getattr(self.db, "distilled_episode_ids", None)
+        if callable(seen_fn) and episodes:
+            try:
+                already = seen_fn([ep.get("id") for ep in episodes])
+            except Exception as e:  # noqa: BLE001 - an unreadable ledger is an empty one
+                logger.warning("Could not read the distilled-episode ledger: %s", e)
+        fresh = [ep for ep in episodes if ep.get("id") not in already]
+        if len(fresh) < self.config.distillation_min_episodes:
             return {
                 "skipped": True,
-                "reason": "insufficient episodes",
-                "episodes_found": len(episodes),
+                "reason": "insufficient episodes" if not already else "insufficient new episodes",
+                "episodes_found": len(fresh),
+                "already_distilled": len(already),
                 "min_required": self.config.distillation_min_episodes,
             }
+        episodes = fresh
 
+        run_marker = str(uuid.uuid4())
         # Group into batches
         batches = self._group_episodes(episodes)
 
@@ -108,6 +123,9 @@ class ReplayDistiller:
                 )
                 total_created += created
                 total_dedup += dedup
+                mark_fn = getattr(self.db, "mark_episodes_distilled", None)
+                if callable(mark_fn) and memory_add_fn is not None:
+                    mark_fn([ep.get("id") for ep in batch], run_marker)
             except Exception as e:
                 logger.warning("Distillation batch failed: %s", e)
                 total_errors += 1
