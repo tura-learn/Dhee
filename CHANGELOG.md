@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.4.4] - 2026-10-07 - Forgetting by time, and never a current fact
+
+Measured on Tura's production stores: one of 38 held any fact about its
+student. Extraction worked — a student's "exam date is 21 october" was
+extracted and kept by the fact gate on 2026-09-30 — and was gone a day later.
+
+- **Decay depends on time, not on how often it runs.** `apply_decay` faded the
+  stored strength by the whole time since the last access on every pass, so
+  forgetting compounded with the cadence. At a five-minute pass a memory meant
+  to last 115 days was forgotten in under one; at a daily pass, in fifteen.
+  Each memory's clock now starts at its own last decay (`decay_since`, read
+  from the DECAY events in `memory_history`), so any number of passes over a
+  span fades a memory exactly as one pass would. `CoreMemory` now logs DECAY
+  events too, and writes only when the strength changed.
+- **A memory that is still the source of a current fact is not forgotten.**
+  Forgetting deletes the facts extracted from a memory along with it. A memory
+  holding a fact nothing has superseded now fades only to the forgetting
+  threshold; once its facts are replaced, it fades like any other.
+
 ## [7.4.3] - 2026-09-23 - One value per thing
 
 - **`per`: a predicate can hold one value per thing.** A vocabulary entry such

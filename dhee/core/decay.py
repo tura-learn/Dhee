@@ -5,7 +5,7 @@ Uses dhee-accel (Rust) when available, pure-Python fallback otherwise.
 
 import math
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from dhee.configs.base import FadeMemConfig
@@ -65,6 +65,36 @@ def calculate_decayed_strength(
         access_count,
         config.access_dampening_factor,
     )
+
+
+def _as_utc(value: Any) -> Optional[datetime]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        try:
+            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def decay_since(last_accessed: Any, last_decayed: Any = None) -> datetime:
+    """The moment a memory's stored strength describes.
+
+    `calculate_decayed_strength` fades the strength it is given by the time
+    elapsed since this moment. The stored strength is what the LAST decay pass
+    left — so the clock must start at that pass, not at the last access, or
+    every pass fades the already-faded strength by the whole elapsed time again
+    and forgetting compounds with how often the pass runs. Measured: a memory
+    meant to last 115 days was forgotten in under one day at a five-minute
+    cadence, and in 15 at a daily one. With the later of the two moments, any
+    number of passes over a span fades a memory exactly as one pass would.
+    """
+    accessed = _as_utc(last_accessed) or datetime.now(timezone.utc)
+    decayed = _as_utc(last_decayed)
+    return max(accessed, decayed) if decayed is not None else accessed
 
 
 def should_forget(strength: float, config: "FadeMemConfig") -> bool:

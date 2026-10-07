@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from dhee.configs.base import MemoryConfig
-from dhee.core.decay import calculate_decayed_strength, should_forget, should_promote
+from dhee.core.decay import calculate_decayed_strength, decay_since, should_forget, should_promote
 from dhee.core.retrieval import composite_score
 from dhee.core.traces import (
     boost_fast_trace,
@@ -403,6 +403,13 @@ class CoreMemory:
             logger.warning("Vector delete failed: %s", e)
         return {"id": memory_id, "event": "DELETE"}
 
+    def _log_decay(self, mem: Dict[str, Any], new_strength: float) -> None:
+        """Record the pass, which is what the next pass starts its clock from."""
+        if callable(getattr(self.db, "log_event", None)):
+            self.db.log_event(
+                mem["id"], "DECAY", old_strength=mem.get("strength"), new_strength=new_strength
+            )
+
     def apply_decay(
         self,
         user_id: Optional[str] = None,
@@ -420,6 +427,19 @@ class CoreMemory:
         decayed = 0
         forgotten = 0
         promoted = 0
+        # Each memory's clock starts at its own last decay. See `decay_since`.
+        last_decayed = (
+            self.db.latest_event_times("DECAY")
+            if callable(getattr(self.db, "latest_event_times", None))
+            else {}
+        )
+        # A memory still the source of a current fact fades only to the
+        # threshold: forgetting it would delete the fact with it.
+        holding_facts = (
+            self.db.memory_ids_holding_current_facts()
+            if callable(getattr(self.db, "memory_ids_holding_current_facts", None))
+            else set()
+        )
 
         for mem in memories:
             if mem.get("immutable"):
@@ -438,12 +458,17 @@ class CoreMemory:
 
             new_strength = calculate_decayed_strength(
                 current_strength=float(mem.get("strength", 1.0)),
-                last_accessed=mem.get("last_accessed", mem.get("created_at", "")),
+                last_accessed=decay_since(
+                    mem.get("last_accessed", mem.get("created_at", "")),
+                    last_decayed.get(str(mem.get("id"))),
+                ),
                 access_count=int(mem.get("access_count", 0)),
                 layer=mem.get("layer", "sml"),
                 config=self.fade_config,
             )
             new_strength = enforce_quality_strength(new_strength, quality)
+            if should_forget(new_strength, self.fade_config) and str(mem.get("id")) in holding_facts:
+                new_strength = self.fade_config.forgetting_threshold
 
             if should_forget(new_strength, self.fade_config):
                 access_count = int(mem.get("access_count", 0))
@@ -486,9 +511,11 @@ class CoreMemory:
                 self.fade_config,
             ) and quality.layer == "lml" and not quality.suppress_from_default_recall:
                 self.db.update_memory(mem["id"], {"strength": new_strength, "layer": "lml"})
+                self._log_decay(mem, new_strength)
                 promoted += 1
-            else:
+            elif new_strength != float(mem.get("strength", 1.0)):
                 self.db.update_memory(mem["id"], {"strength": new_strength})
+                self._log_decay(mem, new_strength)
 
             decayed += 1
 

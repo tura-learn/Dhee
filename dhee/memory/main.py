@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dhee.configs.base import MemoryConfig
-from dhee.core.decay import calculate_decayed_strength, should_forget, should_promote
+from dhee.core.decay import calculate_decayed_strength, decay_since, should_forget, should_promote
 from dhee.core.conflict import resolve_conflict
 from dhee.core.distillation import ReplayDistiller
 from dhee.core.echo import EchoProcessor, EchoDepth, EchoResult
@@ -1523,10 +1523,28 @@ class FullMemory(SmartMemory, SceneProfileMixin):
         decayed = 0
         forgotten = 0
         promoted = 0
+        # Each memory's clock starts at its own last decay, not its last
+        # access: the stored strength is what that pass left. See `decay_since`.
+        last_decayed = (
+            self.db.latest_event_times("DECAY")
+            if callable(getattr(self.db, "latest_event_times", None))
+            else {}
+        )
+        # Forgetting a memory deletes the facts extracted from it, so one that
+        # is still the source of a current fact fades only to the threshold.
+        holding_facts = (
+            self.db.memory_ids_holding_current_facts()
+            if callable(getattr(self.db, "memory_ids_holding_current_facts", None))
+            else set()
+        )
 
         for memory in memories:
             if memory.get("immutable"):
                 continue
+            since = decay_since(
+                memory.get("last_accessed", memory.get("created_at")),
+                last_decayed.get(str(memory.get("id"))),
+            )
 
             # Shruti-tier memories are immune to decay
             _tier_md = memory.get("metadata") or {}
@@ -1573,7 +1591,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                     s_fast=float(memory.get("s_fast", 0.0)),
                     s_mid=float(memory.get("s_mid", 0.0)),
                     s_slow=float(memory.get("s_slow", 0.0)),
-                    last_accessed=memory.get("last_accessed", datetime.now(timezone.utc).isoformat()),
+                    last_accessed=since,
                     access_count=memory.get("access_count", 0),
                     config=self.distillation_config,
                 )
@@ -1581,7 +1599,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             else:
                 new_strength = calculate_decayed_strength(
                     current_strength=memory.get("strength", 1.0),
-                    last_accessed=memory.get("last_accessed", datetime.now(timezone.utc).isoformat()),
+                    last_accessed=since,
                     access_count=memory.get("access_count", 0),
                     layer=memory.get("layer", "sml"),
                     config=self.fade_config,
@@ -1598,6 +1616,8 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                 weak = min(int(ref_state.get("weak", 0)), 10)
                 forget_threshold = forget_threshold / (1.0 + weak * 0.25)
 
+            if new_strength < forget_threshold and str(memory.get("id")) in holding_facts:
+                new_strength = forget_threshold
             if new_strength < forget_threshold:
                 self.delete(memory["id"])
                 forgotten += 1

@@ -5,7 +5,8 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Set
 
 from .sqlite_analytics import SQLiteAnalyticsMixin
 from .sqlite_artifacts import SQLiteArtifactMixin
@@ -22,6 +23,52 @@ logger = logging.getLogger(__name__)
 
 class _SQLiteBase:
     """Base class for SQLite managers with common functionality."""
+
+    def latest_event_times(self, event: str) -> Dict[str, str]:
+        """When each memory last had `event` logged, as the history table wrote it.
+
+        Read once per decay pass, so the pass can start each memory's clock at
+        its own last decay (see `core.decay.decay_since`).
+        """
+        with self._get_connection() as conn:
+            if not getattr(self, "_history_event_index", False):
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_memory_history_event_memory "
+                    "ON memory_history(event, memory_id)"
+                )
+                self._history_event_index = True
+            rows = conn.execute(
+                "SELECT memory_id, MAX(timestamp) FROM memory_history WHERE event = ? GROUP BY memory_id",
+                (event,),
+            ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows if row[1]}
+
+    def memory_ids_holding_current_facts(self) -> Set[str]:
+        """Memories that are still the source of a fact nothing has replaced.
+
+        Forgetting a memory deletes the facts extracted from it (see
+        `_delete_memory_query_artifacts_conn`). Decay asks this first, so a
+        conversation can fade without taking "exam on 21 October" with it.
+        """
+        with self._get_connection() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'engram_facts'"
+            ).fetchone()
+            if not exists:
+                return set()
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(engram_facts)")}
+            where, params = [], []
+            if "superseded_by_id" in columns:
+                where.append("superseded_by_id IS NULL")
+            if "valid_until" in columns:
+                where.append("(valid_until IS NULL OR valid_until = '' OR valid_until > ?)")
+                params.append(datetime.now(timezone.utc).isoformat())
+            rows = conn.execute(
+                "SELECT DISTINCT memory_id FROM engram_facts"
+                + (" WHERE " + " AND ".join(where) if where else ""),
+                params,
+            ).fetchall()
+        return {str(row[0]) for row in rows if row[0]}
 
     def __init__(self, db_path: str):
         self.db_path = db_path
